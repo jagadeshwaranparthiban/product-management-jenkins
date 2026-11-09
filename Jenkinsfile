@@ -13,6 +13,7 @@ pipeline {
 
     options {
         disableConcurrentBuilds()
+        timestamps()
     }
 
     stages {
@@ -54,57 +55,61 @@ pipeline {
                 sh '''
                     echo "Building Docker image: ${LOCAL_IMAGE}"
 
-                    docker build \
-                        -t "${LOCAL_IMAGE}" \
-                        .
-
-                    docker tag \
-                        "${LOCAL_IMAGE}" \
-                        "${REMOTE_IMAGE}"
+                    docker build -t "${LOCAL_IMAGE}" .
+                    docker tag "${LOCAL_IMAGE}" "${REMOTE_IMAGE}"
                 '''
             }
         }
 
         stage('Verify AWS CLI') {
             steps {
-                sh '''
-                    echo "AWS CLI location:"
-                    which aws
-
-                    echo "AWS CLI version:"
-                    aws --version
-                '''
-            }
-        }
-        
-        stage('Push Image to Amazon ECR') {
-        steps {
-            withEnv(["PATH+AWS=/usr/local/bin"]) {
-                withCredentials([
-                    string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
-                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
-                ]) {
+                withEnv(["PATH+AWS=/usr/local/bin"]) {
                     sh '''
                         set -e
-
-                        export AWS_DEFAULT_REGION="$AWS_REGION"
-
-                        echo "Verifying AWS CLI..."
+                        echo "AWS CLI location:"
                         command -v aws
+
+                        echo "AWS CLI version:"
                         aws --version
-
-                        echo "Verifying AWS identity..."
-                        aws sts get-caller-identity
-
-                        echo "Logging into Amazon ECR..."
-                        aws ecr get-login-password --region "$AWS_REGION" |
-                            docker login --username AWS --password-stdin "$ECR_REGISTRY"
-
-                        echo "Pushing Docker image..."
-                        docker push "$REMOTE_IMAGE"
-
-                        echo "Successfully pushed to ECR: $REMOTE_IMAGE"
                     '''
+                }
+            }
+        }
+
+        stage('Push Image to Amazon ECR') {
+            steps {
+                withEnv(["PATH+AWS=/usr/local/bin"]) {
+                    withCredentials([
+                        string(
+                            credentialsId: 'aws-access-key-id',
+                            variable: 'AWS_ACCESS_KEY_ID'
+                        ),
+                        string(
+                            credentialsId: 'aws-secret-access-key',
+                            variable: 'AWS_SECRET_ACCESS_KEY'
+                        )
+                    ]) {
+                        sh '''
+                            set -e
+
+                            export AWS_DEFAULT_REGION="$AWS_REGION"
+
+                            echo "Verifying AWS identity..."
+                            aws sts get-caller-identity
+
+                            echo "Logging into Amazon ECR..."
+                            aws ecr get-login-password \
+                                --region "$AWS_REGION" |
+                                docker login \
+                                    --username AWS \
+                                    --password-stdin "$ECR_REGISTRY"
+
+                            echo "Pushing Docker image..."
+                            docker push "$REMOTE_IMAGE"
+
+                            echo "Successfully pushed to ECR: $REMOTE_IMAGE"
+                        '''
+                    }
                 }
             }
         }
@@ -124,5 +129,4 @@ pipeline {
             echo "Jenkins pipeline execution completed."
         }
     }
-}
 }
