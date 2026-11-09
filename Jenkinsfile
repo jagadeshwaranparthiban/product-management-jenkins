@@ -4,7 +4,7 @@ pipeline {
 
     environment {
         APP_NAME = 'product-management'
-
+	PATH+AWS = '/usr/local/bin'
         AWS_REGION = 'ap-south-1'
         AWS_ACCOUNT_ID = '769863964654'
 
@@ -67,6 +67,18 @@ pipeline {
             }
         }
 
+        stage('Verify AWS CLI') {
+            steps {
+                sh '''
+                    echo "AWS CLI location:"
+                    which aws
+
+                    echo "AWS CLI version:"
+                    aws --version
+                '''
+            }
+        }
+        
         stage('Push Image to Amazon ECR') {
             steps {
                 withCredentials([
