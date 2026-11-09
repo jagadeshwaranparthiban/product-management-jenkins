@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -125,4 +124,5 @@ pipeline {
             echo "Jenkins pipeline execution completed."
         }
     }
+}
 }
