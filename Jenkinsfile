@@ -1,12 +1,21 @@
+
 pipeline {
     agent any
 
-    options {
-        disableConcurrentBuilds()
-    }
-
     environment {
         APP_NAME = 'product-management'
+
+        AWS_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = '769863964654'
+
+        ECR_REPOSITORY = 'product-management-api'
+        ECR_REGISTRY = '769863964654.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_URI = '769863964654.dkr.ecr.ap-south-1.amazonaws.com/product-management-api'
+    }
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
     }
 
     stages {
@@ -19,8 +28,6 @@ pipeline {
 
         stage('Build and Test') {
             steps {
-                echo 'Running Maven build and tests...'
-
                 sh '''
                     chmod +x mvnw
                     ./mvnw -B clean verify
@@ -37,32 +44,81 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
-                    def imageTag = "${APP_NAME}:${BUILD_NUMBER}"
+                    def commitSha = sh(
+                        script: 'git rev-parse --short=12 HEAD',
+                        returnStdout: true
+                    ).trim()
 
-                    sh """
-                        docker build -t ${imageTag} .
-                    """
+                    env.IMAGE_TAG = "${commitSha}-${env.BUILD_NUMBER}"
+                    env.LOCAL_IMAGE = "${env.APP_NAME}:${env.IMAGE_TAG}"
+                    env.REMOTE_IMAGE = "${env.ECR_URI}:${env.IMAGE_TAG}"
+                }
 
-                    echo "Docker image created: ${imageTag}"
+                sh '''
+                    echo "Building Docker image: ${LOCAL_IMAGE}"
+
+                    docker build \
+                        -t "${LOCAL_IMAGE}" \
+                        .
+
+                    docker tag \
+                        "${LOCAL_IMAGE}" \
+                        "${REMOTE_IMAGE}"
+                '''
+            }
+        }
+
+        stage('Push Image to Amazon ECR') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+
+                        echo "Verifying AWS identity..."
+                        aws sts get-caller-identity
+
+                        echo "Authenticating Docker with Amazon ECR..."
+
+                        aws ecr get-login-password \
+                            --region "${AWS_REGION}" |
+                        docker login \
+                            --username AWS \
+                            --password-stdin "${ECR_REGISTRY}"
+
+                        echo "Pushing image: ${REMOTE_IMAGE}"
+
+                        docker push "${REMOTE_IMAGE}"
+
+                        echo "Successfully pushed image to ECR."
+                    '''
                 }
             }
         }
     }
 
     post {
-        always {
-            archiveArtifacts(
-                artifacts: 'target/site/jacoco/**',
-                allowEmptyArchive: true
-            )
-        }
-
         success {
-            echo 'CI pipeline completed successfully!'
+            echo "Pipeline completed successfully!"
+            echo "Published image: ${env.REMOTE_IMAGE}"
         }
 
         failure {
-            echo 'CI pipeline failed. Check the stage logs.'
+            echo "Pipeline failed. Check the stage logs."
+        }
+
+        always {
+            echo "Jenkins pipeline execution completed."
         }
     }
 }
