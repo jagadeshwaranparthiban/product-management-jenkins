@@ -4,7 +4,6 @@ pipeline {
 
     environment {
         APP_NAME = 'product-management'
-	PATH+AWS = '/usr/local/bin'
         AWS_REGION = 'ap-south-1'
         AWS_ACCOUNT_ID = '769863964654'
 
@@ -80,38 +79,32 @@ pipeline {
         }
         
         stage('Push Image to Amazon ECR') {
-            steps {
+        steps {
+            withEnv(["PATH+AWS=/usr/local/bin"]) {
                 withCredentials([
-                    string(
-                        credentialsId: 'aws-access-key-id',
-                        variable: 'AWS_ACCESS_KEY_ID'
-                    ),
-                    string(
-                        credentialsId: 'aws-secret-access-key',
-                        variable: 'AWS_SECRET_ACCESS_KEY'
-                    )
+                    string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
                 ]) {
                     sh '''
                         set -e
 
-                        export AWS_DEFAULT_REGION="${AWS_REGION}"
+                        export AWS_DEFAULT_REGION="$AWS_REGION"
+
+                        echo "Verifying AWS CLI..."
+                        command -v aws
+                        aws --version
 
                         echo "Verifying AWS identity..."
                         aws sts get-caller-identity
 
-                        echo "Authenticating Docker with Amazon ECR..."
+                        echo "Logging into Amazon ECR..."
+                        aws ecr get-login-password --region "$AWS_REGION" |
+                            docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-                        aws ecr get-login-password \
-                            --region "${AWS_REGION}" |
-                        docker login \
-                            --username AWS \
-                            --password-stdin "${ECR_REGISTRY}"
+                        echo "Pushing Docker image..."
+                        docker push "$REMOTE_IMAGE"
 
-                        echo "Pushing image: ${REMOTE_IMAGE}"
-
-                        docker push "${REMOTE_IMAGE}"
-
-                        echo "Successfully pushed image to ECR."
+                        echo "Successfully pushed to ECR: $REMOTE_IMAGE"
                     '''
                 }
             }
