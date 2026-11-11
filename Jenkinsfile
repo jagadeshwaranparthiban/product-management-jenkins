@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -9,6 +10,8 @@ pipeline {
         ECR_REPOSITORY = 'product-management-api'
         ECR_REGISTRY = '769863964654.dkr.ecr.ap-south-1.amazonaws.com'
         ECR_URI = '769863964654.dkr.ecr.ap-south-1.amazonaws.com/product-management-api'
+
+        EC2_INSTANCE_ID = 'i-0757a128504f7177a'
     }
 
     options {
@@ -16,77 +19,7 @@ pipeline {
     }
 
     stages {
-        stage('Test EC2 SSM Connectivity') {
-            steps {
-                withCredentials([
-                    string(credentialsId: 'aws-access-key-id',
-                        variable: 'AWS_ACCESS_KEY_ID'),
-                    string(credentialsId: 'aws-secret-access-key',
-                        variable: 'AWS_SECRET_ACCESS_KEY')
-                ]) {
-                    withEnv(["PATH+AWS=/usr/local/bin"]) {
-                        sh '''
-                            set -e
 
-                            export AWS_DEFAULT_REGION=ap-south-1
-
-                            echo "Verifying Jenkins AWS identity..."
-                            aws sts get-caller-identity
-
-                            echo "Sending remote command to EC2..."
-
-                            COMMAND_ID=$(aws ssm send-command \
-                            --instance-ids i-0757a128504f7177a \
-                            --document-name AWS-RunShellScript \
-                            --parameters 'commands=["echo SSM connectivity successful","hostname","id"]' \
-                            --comment "Jenkins SSM connectivity test" \
-                            --region ap-south-1 \
-                            --query "Command.CommandId" \
-                            --output text)
-
-                            echo "Command ID: $COMMAND_ID"
-
-                            for i in $(seq 1 30); do
-                                STATUS=$(aws ssm get-command-invocation \
-                                --command-id "$COMMAND_ID" \
-                                --instance-id i-0757a128504f7177a \
-                                --region ap-south-1 \
-                                --query "Status" \
-                                --output text 2>/dev/null || true)
-
-                                echo "SSM execution status: $STATUS"
-
-                                if [ "$STATUS" = "Success" ]; then
-                                    break
-                                fi
-
-                                if [ "$STATUS" = "Failed" ] || \
-                                [ "$STATUS" = "Cancelled" ] || \
-                                [ "$STATUS" = "TimedOut" ]; then
-                                    echo "SSM command failed."
-                                    exit 1
-                                fi
-
-                                sleep 2
-                            done
-
-                            if [ "$STATUS" != "Success" ]; then
-                                echo "SSM command did not complete successfully."
-                                exit 1
-                            fi
-
-                            aws ssm get-command-invocation \
-                            --command-id "$COMMAND_ID" \
-                            --instance-id i-0757a128504f7177a \
-                            --region ap-south-1 \
-                            --query "[Status,StandardOutputContent,StandardErrorContent]" \
-                            --output text
-                        '''
-                    }
-                }
-            }
-        }
-        
         stage('Checkout') {
             steps {
                 checkout scm
@@ -135,6 +68,7 @@ pipeline {
                 withEnv(["PATH+AWS=/usr/local/bin"]) {
                     sh '''
                         set -e
+
                         echo "AWS CLI location:"
                         command -v aws
 
@@ -167,6 +101,7 @@ pipeline {
                             aws sts get-caller-identity
 
                             echo "Logging into Amazon ECR..."
+
                             aws ecr get-login-password \
                                 --region "$AWS_REGION" |
                                 docker login \
@@ -176,7 +111,126 @@ pipeline {
                             echo "Pushing Docker image..."
                             docker push "$REMOTE_IMAGE"
 
-                            echo "Successfully pushed to ECR: $REMOTE_IMAGE"
+                            echo "Successfully pushed: $REMOTE_IMAGE"
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to EC2 via SSM') {
+            steps {
+                withEnv(["PATH+AWS=/usr/local/bin"]) {
+                    withCredentials([
+                        string(
+                            credentialsId: 'aws-access-key-id',
+                            variable: 'AWS_ACCESS_KEY_ID'
+                        ),
+                        string(
+                            credentialsId: 'aws-secret-access-key',
+                            variable: 'AWS_SECRET_ACCESS_KEY'
+                        )
+                    ]) {
+                        sh '''
+                            set -e
+
+                            export AWS_DEFAULT_REGION="$AWS_REGION"
+
+                            echo "======================================"
+                            echo "Starting EC2 deployment"
+                            echo "Image: $REMOTE_IMAGE"
+                            echo "Instance: $EC2_INSTANCE_ID"
+                            echo "======================================"
+
+                            # Validate image tag before passing it to SSM.
+                            case "$IMAGE_TAG" in
+                                *[!A-Za-z0-9._-]*|'')
+                                    echo "Invalid Docker image tag."
+                                    exit 1
+                                    ;;
+                            esac
+
+                            echo "Verifying Jenkins AWS identity..."
+                            aws sts get-caller-identity
+
+                            # Construct SSM parameters as JSON.
+                            COMMANDS_JSON=$(printf \
+                                '{"commands":["/opt/product-management/deploy.sh %s"]}' \
+                                "$IMAGE_TAG")
+
+                            echo "Sending deployment command to EC2..."
+
+                            COMMAND_ID=$(aws ssm send-command \
+                                --instance-ids "$EC2_INSTANCE_ID" \
+                                --document-name AWS-RunShellScript \
+                                --parameters "$COMMANDS_JSON" \
+                                --comment "Deploy product-management image $IMAGE_TAG" \
+                                --timeout-seconds 600 \
+                                --region "$AWS_REGION" \
+                                --query "Command.CommandId" \
+                                --output text)
+
+                            echo "SSM Command ID: $COMMAND_ID"
+
+                            STATUS="Pending"
+
+                            # Wait up to 5 minutes for deployment.
+                            for i in $(seq 1 60); do
+
+                                STATUS=$(aws ssm get-command-invocation \
+                                    --command-id "$COMMAND_ID" \
+                                    --instance-id "$EC2_INSTANCE_ID" \
+                                    --region "$AWS_REGION" \
+                                    --query "Status" \
+                                    --output text 2>/dev/null || true)
+
+                                echo "Deployment status: $STATUS"
+
+                                if [ "$STATUS" = "Success" ]; then
+                                    break
+                                fi
+
+                                case "$STATUS" in
+                                    Failed|Cancelled|TimedOut|Cancelling)
+                                        echo "EC2 deployment failed."
+
+                                        aws ssm get-command-invocation \
+                                            --command-id "$COMMAND_ID" \
+                                            --instance-id "$EC2_INSTANCE_ID" \
+                                            --region "$AWS_REGION" \
+                                            --query "[Status,StandardOutputContent,StandardErrorContent]" \
+                                            --output text || true
+
+                                        exit 1
+                                        ;;
+                                esac
+
+                                sleep 5
+                            done
+
+                            if [ "$STATUS" != "Success" ]; then
+                                echo "Deployment did not complete within the expected time."
+
+                                aws ssm get-command-invocation \
+                                    --command-id "$COMMAND_ID" \
+                                    --instance-id "$EC2_INSTANCE_ID" \
+                                    --region "$AWS_REGION" \
+                                    --query "[Status,StandardOutputContent,StandardErrorContent]" \
+                                    --output text || true
+
+                                exit 1
+                            fi
+
+                            echo "======================================"
+                            echo "EC2 deployment completed successfully"
+                            echo "======================================"
+
+                            aws ssm get-command-invocation \
+                                --command-id "$COMMAND_ID" \
+                                --instance-id "$EC2_INSTANCE_ID" \
+                                --region "$AWS_REGION" \
+                                --query "[Status,StandardOutputContent,StandardErrorContent]" \
+                                --output text
                         '''
                     }
                 }
@@ -188,6 +242,7 @@ pipeline {
         success {
             echo "Pipeline completed successfully!"
             echo "Published image: ${env.REMOTE_IMAGE}"
+            echo "Deployment completed on EC2."
         }
 
         failure {
