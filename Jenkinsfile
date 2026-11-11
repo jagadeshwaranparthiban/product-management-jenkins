@@ -16,7 +16,77 @@ pipeline {
     }
 
     stages {
+        stage('Test EC2 SSM Connectivity') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    withEnv(["PATH+AWS=/usr/local/bin"]) {
+                        sh '''
+                            set -e
 
+                            export AWS_DEFAULT_REGION=ap-south-1
+
+                            echo "Verifying Jenkins AWS identity..."
+                            aws sts get-caller-identity
+
+                            echo "Sending remote command to EC2..."
+
+                            COMMAND_ID=$(aws ssm send-command \
+                            --instance-ids i-0757a128504f7177a \
+                            --document-name AWS-RunShellScript \
+                            --parameters 'commands=["echo SSM connectivity successful","hostname","id"]' \
+                            --comment "Jenkins SSM connectivity test" \
+                            --region ap-south-1 \
+                            --query "Command.CommandId" \
+                            --output text)
+
+                            echo "Command ID: $COMMAND_ID"
+
+                            for i in $(seq 1 30); do
+                                STATUS=$(aws ssm get-command-invocation \
+                                --command-id "$COMMAND_ID" \
+                                --instance-id i-0757a128504f7177a \
+                                --region ap-south-1 \
+                                --query "Status" \
+                                --output text 2>/dev/null || true)
+
+                                echo "SSM execution status: $STATUS"
+
+                                if [ "$STATUS" = "Success" ]; then
+                                    break
+                                fi
+
+                                if [ "$STATUS" = "Failed" ] || \
+                                [ "$STATUS" = "Cancelled" ] || \
+                                [ "$STATUS" = "TimedOut" ]; then
+                                    echo "SSM command failed."
+                                    exit 1
+                                fi
+
+                                sleep 2
+                            done
+
+                            if [ "$STATUS" != "Success" ]; then
+                                echo "SSM command did not complete successfully."
+                                exit 1
+                            fi
+
+                            aws ssm get-command-invocation \
+                            --command-id "$COMMAND_ID" \
+                            --instance-id i-0757a128504f7177a \
+                            --region ap-south-1 \
+                            --query "[Status,StandardOutputContent,StandardErrorContent]" \
+                            --output text
+                        '''
+                    }
+                }
+            }
+        }
+        
         stage('Checkout') {
             steps {
                 checkout scm
